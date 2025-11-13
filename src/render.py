@@ -1,3 +1,5 @@
+import re
+
 from .util import generate_data_path
 from playwright.async_api import async_playwright
 from jinja2.sandbox import SandboxedEnvironment
@@ -73,11 +75,31 @@ class Text2ImgRender:
         if self.context is None:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch()
-            self.context = await self.browser.new_context()
+            self.context = await self.browser.new_context(
+                device_scale_factor=1.8,
+            )
 
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
         page = await self.context.new_page()
+
+        # 若 HTML 中声明了 meta viewport 宽度，则按该宽度调整浏览器视口，
+        # 使 full_page 截图的宽度与页面内容一致，避免右侧出现多余留白。
+        try:
+            with open(html_file_path, "r", encoding="utf-8") as f:
+                # 只读前几 KB 即可命中 <head> 区域
+                head_snippet = f.read(4096)
+            m = re.search(
+                r'content="width=(\d+),\s*initial-scale=1.0"', head_snippet
+            )
+            if m:
+                vw = int(m.group(1))
+                # 高度给一个合理默认值，full_page=True 时会自动扩展高度
+                await page.set_viewport_size({"width": vw, "height": 720})
+                logger.info(f"html2pic: set viewport width from meta to {vw}")
+        except Exception as e:
+            logger.debug(f"Adjust viewport from meta tag failed: {e}")
+
         await page.goto(f"file://{html_file_path}")
         await page.screenshot(path=result_path, **screenshot_options.model_dump())
         await page.close()
