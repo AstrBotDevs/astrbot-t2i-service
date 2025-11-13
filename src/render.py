@@ -73,9 +73,7 @@ class Text2ImgRender:
         if self.context is None:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch()
-            self.context = await self.browser.new_context(
-                device_scale_factor=1.8,
-            )
+            self.context = await self.browser.new_context()
 
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
