@@ -1,3 +1,5 @@
+import re
+
 from .util import generate_data_path
 from playwright.async_api import async_playwright
 from jinja2.sandbox import SandboxedEnvironment
@@ -46,6 +48,9 @@ class ScreenshotOptions(BaseModel):
     animations: Literal["allow", "disabled", None] = None
     caret: Literal["hide", "initial", None] = None
     scale: Literal["css", "device", None] = None
+    # 额外增强字段：若指定则强制使用该宽度作为 Playwright viewport 宽度，
+    # 未指定时则自动从 HTML meta viewport 中推断（保持向后兼容）。
+    viewport_width: int | None = None
 
 
 class Text2ImgRender:
@@ -53,6 +58,33 @@ class Text2ImgRender:
         self.playwright = None
         self.browser = None
         self.context = None
+
+    async def _ensure_context(self) -> None:
+        """确保 Playwright Browser/Context 可用。
+
+        - 懒加载 playwright 实例和浏览器实例；
+        - 若 context 不存在或已关闭，则重新创建；
+        - 将所有初始化逻辑集中在一处，避免 html2pic 中散落判断。
+        """
+
+        if self.playwright is None:
+            self.playwright = await async_playwright().start()
+
+        if self.browser is None:
+            self.browser = await self.playwright.chromium.launch()
+
+        context_closed = False
+        if self.context is not None:
+            # Playwright 的 BrowserContext 提供 is_closed 方法；为兼容性
+            # 使用 getattr 安全访问，避免未来实现细节变化导致 AttributeError。
+            is_closed = getattr(self.context, "is_closed", None)
+            if callable(is_closed):
+                context_closed = bool(is_closed())
+
+        if self.context is None or context_closed:
+            self.context = await self.browser.new_context(
+                device_scale_factor=1.8,
+            )
 
     async def from_jinja_template(self, template: str, data: dict) -> tuple[str, str]:
         env = SandboxedEnvironment()
@@ -67,20 +99,71 @@ class Text2ImgRender:
             f.write(html)
         return html_file_path, abs_path
 
+    def _resolve_viewport_width(
+        self, html_file_path: str, screenshot_options: ScreenshotOptions
+    ) -> int | None:
+        """根据截图参数与 HTML 内容推断 viewport 宽度。
+
+        优先级：
+        1. 调用方在 ScreenshotOptions 中显式指定 `viewport_width`；
+        2. 从 HTML 中的 `<meta name="viewport" content="width=xxx">` 自动解析；
+        3. 未能解析到时返回 None（调用方可选择使用 Playwright 默认值）。
+
+        将逻辑集中到独立方法，便于后续扩展：
+        - 支持更多 meta 语法 / 自定义 data-* 属性；
+        - 支持从额外配置源中读取默认宽度等。
+        """
+
+        # 1) 调用方显式指定，直接使用
+        viewport_width: int | None = screenshot_options.viewport_width
+        if viewport_width is not None:
+            return viewport_width
+
+        # 2) 未指定时，从 HTML meta viewport 中推断
+        try:
+            with open(html_file_path, "r", encoding="utf-8") as f:
+                # 只读前几 KB 即可命中 <head> 区域
+                head_snippet = f.read(4096)
+
+            pattern = (
+                r'<meta\s+[^>]*name=["\']viewport["\'][^>]*'
+                r'content=["\'][^"\']*width\s*=\s*(\d+)[^"\']*["\'][^>]*>'
+            )
+            if m := re.search(pattern, head_snippet, re.IGNORECASE):
+                viewport_width = int(m[1])
+        except (OSError, UnicodeDecodeError, re.error, ValueError) as e:
+            logger.debug(f"Adjust viewport from meta tag failed: {e}")
+
+        return viewport_width
+
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
-        if self.context is None:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch()
-            self.context = await self.browser.new_context()
-
+        await self._ensure_context()
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
         page = await self.context.new_page()
-        await page.goto(f"file://{html_file_path}")
-        await page.screenshot(path=result_path, **screenshot_options.model_dump())
-        await page.close()
+
+        viewport_width = self._resolve_viewport_width(
+            html_file_path, screenshot_options
+        )
+        if viewport_width is not None:
+            # 高度给一个合理默认值，full_page=True 时会自动扩展高度
+            await page.set_viewport_size({"width": viewport_width, "height": 720})
+            logger.info(
+                f"html2pic: set viewport width to {viewport_width}"
+            )
+
+        try:
+            await page.goto(f"file://{html_file_path}")
+            # ScreenshotOptions 中的 viewport_width 仅用于内部控制 viewport，
+            # 不透传给 Playwright.screenshot，以免出现未知参数错误。
+            screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
+            screenshot_kwargs.pop("viewport_width", None)
+            await page.screenshot(path=result_path, **screenshot_kwargs)
+        finally:
+            # 确保在异常情况下也能关闭 page，避免资源泄漏。
+            await page.close()
 
         logger.info(f"Rendered {html_file_path} to {result_path}")
 
