@@ -48,6 +48,9 @@ class ScreenshotOptions(BaseModel):
     animations: Literal["allow", "disabled", None] = None
     caret: Literal["hide", "initial", None] = None
     scale: Literal["css", "device", None] = None
+    # 额外增强字段：若指定则在渲染前设置 Playwright BrowserContext 的 device_scale_factor，
+    # 未指定时使用服务端默认值（保持与旧版本一致，一般为 1.0）。
+    device_scale_factor: float | None = None
     # 额外增强字段：若指定则强制使用该宽度作为 Playwright viewport 宽度，
     # 未指定时则自动从 HTML meta viewport 中推断（保持向后兼容）。
     viewport_width: int | None = None
@@ -58,14 +61,25 @@ class Text2ImgRender:
         self.playwright = None
         self.browser = None
         self.context = None
+        # 默认缩放因子：保持与旧行为一致，逻辑宽度与 CSS 宽度相同
+        self._default_device_scale_factor: float = 1.0
+        # 当前 Context 所采用的缩放因子，用于在需要时重建 Context
+        self._current_device_scale_factor: float | None = None
 
-    async def _ensure_context(self) -> None:
+    async def _ensure_context(self, device_scale_factor: float | None = None) -> None:
         """确保 Playwright Browser/Context 可用。
 
         - 懒加载 playwright 实例和浏览器实例；
         - 若 context 不存在或已关闭，则重新创建；
         - 将所有初始化逻辑集中在一处，避免 html2pic 中散落判断。
         """
+
+        # 确定本次应使用的缩放因子：请求指定 > 默认值
+        target_dsf: float = (
+            device_scale_factor
+            if device_scale_factor is not None
+            else self._default_device_scale_factor
+        )
 
         if self.playwright is None:
             self.playwright = await async_playwright().start()
@@ -81,10 +95,23 @@ class Text2ImgRender:
             if callable(is_closed):
                 context_closed = bool(is_closed())
 
-        if self.context is None or context_closed:
+        # 若 Context 不存在、已关闭，或缩放因子不匹配，则重建 Context
+        if (
+            self.context is None
+            or context_closed
+            or self._current_device_scale_factor != target_dsf
+        ):
+            # 尝试关闭旧的 Context，避免资源泄漏
+            if self.context is not None and not context_closed:
+                try:
+                    await self.context.close()
+                except Exception as e:
+                    logger.debug(f"Close old browser context failed: {e}")
+
             self.context = await self.browser.new_context(
-                device_scale_factor=1.8,
+                device_scale_factor=target_dsf,
             )
+            self._current_device_scale_factor = target_dsf
 
     async def from_jinja_template(self, template: str, data: dict) -> tuple[str, str]:
         env = SandboxedEnvironment()
@@ -139,7 +166,8 @@ class Text2ImgRender:
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
-        await self._ensure_context()
+        # 根据请求参数确定本次使用的 device_scale_factor（可选）
+        await self._ensure_context(screenshot_options.device_scale_factor)
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
         page = await self.context.new_page()
@@ -160,6 +188,7 @@ class Text2ImgRender:
             # 不透传给 Playwright.screenshot，以免出现未知参数错误。
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
+            screenshot_kwargs.pop("device_scale_factor", None)
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
             # 确保在异常情况下也能关闭 page，避免资源泄漏。
