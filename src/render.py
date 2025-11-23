@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 from typing import Literal
 from loguru import logger
+from playwright.async_api import BrowserContext, Browser, Playwright
+from playwright._impl._errors import TargetClosedError
 
 
 class FloatRect(TypedDict):
@@ -35,6 +37,11 @@ class ScreenshotOptions(BaseModel):
             当设置为 `css` 时，则将设备分辨率与 CSS 中的像素一一对应，在高分屏上会使得截图变小.
             当设置为 `device` 时，则根据设备的屏幕缩放设置或当前 Playwright 的 Page/Context 中的
             device_scale_factor 参数来缩放.
+        viewport_width: (int, optional): 自定义视口宽度，用于控制截图宽度.
+        device_scale_factor_level: (Literal["normal", "high", "ultra"], optional): 设备像素比等级.
+            - normal: 1.0
+            - high: 1.3
+            - ultra: 1.8
 
     @author: Redlnn(https://github.com/GraiaCommunity/graiax-text2img-playwright)
     """
@@ -48,43 +55,57 @@ class ScreenshotOptions(BaseModel):
     animations: Literal["allow", "disabled", None] = None
     caret: Literal["hide", "initial", None] = None
     scale: Literal["css", "device", None] = None
-    # 额外增强字段：若指定则强制使用该宽度作为 Playwright viewport 宽度，
-    # 未指定时则自动从 HTML meta viewport 中推断（保持向后兼容）。
     viewport_width: int | None = None
+    device_scale_factor_level: Literal["normal", "high", "ultra", None] = None
 
 
 class Text2ImgRender:
+    # Mapping from device_scale_factor_level to actual device_scale_factor
+    SCALE_FACTOR_MAP = {
+        "normal": 1.0,
+        "high": 1.3,
+        "ultra": 1.8,
+    }
+
     def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.context = None
+        self.playwright: Playwright | None = None
+        self.browser: Browser | None = None
+        # Context pool: {"normal": context, "high": context, "ultra": context}
+        self.contexts: dict[str, BrowserContext] = {}
 
-    async def _ensure_context(self) -> None:
-        """确保 Playwright Browser/Context 可用。
+    async def _ensure_context(self, level: str = "normal") -> BrowserContext:
+        """Ensure that Playwright, Browser and BrowserContext are initialized.
 
-        - 懒加载 playwright 实例和浏览器实例；
-        - 若 context 不存在或已关闭，则重新创建；
-        - 将所有初始化逻辑集中在一处，避免 html2pic 中散落判断。
+        Args:
+            level: Device scale factor level ("normal", "high", or "ultra").
+                   Defaults to "normal" if not specified.
+
+        Returns:
+            The BrowserContext for the specified level.
         """
-
         if self.playwright is None:
             self.playwright = await async_playwright().start()
 
-        if self.browser is None:
-            self.browser = await self.playwright.chromium.launch()
+        # ensure browser launched
+        if self.browser is None or not self.browser.is_connected():
+            if self.browser is not None:
+                try:
+                    await self.browser.close()
+                except Exception as e:
+                    logger.debug(f"Close old browser failed: {e}")
+            self.browser = await self.playwright.chromium.launch(headless=True)
 
-        context_closed = False
-        if self.context is not None:
-            # Playwright 的 BrowserContext 提供 is_closed 方法；为兼容性
-            # 使用 getattr 安全访问，避免未来实现细节变化导致 AttributeError。
-            is_closed = getattr(self.context, "is_closed", None)
-            if callable(is_closed):
-                context_closed = bool(is_closed())
-
-        if self.context is None or context_closed:
-            self.context = await self.browser.new_context(
-                device_scale_factor=1.8,
+        # ensure context available for the specified level
+        if level not in self.contexts:
+            scale_factor = self.SCALE_FACTOR_MAP.get(level, 1.0)
+            self.contexts[level] = await self.browser.new_context(
+                device_scale_factor=scale_factor,
             )
+            logger.info(
+                f"Created context for level '{level}' with device_scale_factor={scale_factor}"
+            )
+
+        return self.contexts[level]
 
     async def from_jinja_template(self, template: str, data: dict) -> tuple[str, str]:
         env = SandboxedEnvironment()
@@ -136,33 +157,73 @@ class Text2ImgRender:
 
         return viewport_width
 
+    async def terminate(self) -> None:
+        """Terminate Playwright and close browser."""
+        # Close all contexts in the pool
+        for level, context in list(self.contexts.items()):
+            try:
+                await context.close()
+                logger.debug(f"Closed context for level '{level}'")
+            except Exception as e:
+                logger.debug(f"Close context for level '{level}' failed: {e}")
+        self.contexts.clear()
+
+        if self.browser is not None:
+            try:
+                await self.browser.close()
+            except Exception as e:
+                logger.debug(f"Close browser failed: {e}")
+            self.browser = None
+
+        if self.playwright is not None:
+            try:
+                await self.playwright.stop()
+            except Exception as e:
+                logger.debug(f"Stop Playwright failed: {e}")
+            self.playwright = None
+
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
-        await self._ensure_context()
+        # Determine which context to use based on device_scale_factor_level
+        level = screenshot_options.device_scale_factor_level or "normal"
+        context = await self._ensure_context(level)
+
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
-        page = await self.context.new_page()
+
+        try:
+            page = await context.new_page()
+        except TargetClosedError as e:
+            logger.warning(
+                f"html2pic: Failed to create new page, restarting browser context: {e}"
+            )
+            # Close and remove the specific context, then recreate it
+            if level in self.contexts:
+                try:
+                    await self.contexts[level].close()
+                except Exception:
+                    pass
+                del self.contexts[level]
+            context = await self._ensure_context(level)
+            page = await context.new_page()
 
         viewport_width = self._resolve_viewport_width(
             html_file_path, screenshot_options
         )
         if viewport_width is not None:
-            # 高度给一个合理默认值，full_page=True 时会自动扩展高度
+            # set viewport size to control the width of the screenshot
             await page.set_viewport_size({"width": viewport_width, "height": 720})
-            logger.info(
-                f"html2pic: set viewport width to {viewport_width}"
-            )
+            logger.info(f"html2pic: set viewport width to {viewport_width}")
 
         try:
             await page.goto(f"file://{html_file_path}")
-            # ScreenshotOptions 中的 viewport_width 仅用于内部控制 viewport，
-            # 不透传给 Playwright.screenshot，以免出现未知参数错误。
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
+            screenshot_kwargs.pop("device_scale_factor_level", None)
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
-            # 确保在异常情况下也能关闭 page，避免资源泄漏。
+            # Ensure the page is closed to free resources
             await page.close()
 
         logger.info(f"Rendered {html_file_path} to {result_path}")
