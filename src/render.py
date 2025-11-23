@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 from typing import Literal
 from loguru import logger
+from playwright.async_api import BrowserContext, Browser, Playwright
+from playwright._impl._errors import TargetClosedError
 
 
 class FloatRect(TypedDict):
@@ -53,73 +55,29 @@ class ScreenshotOptions(BaseModel):
 
 class Text2ImgRender:
     def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.context = None
-        # 默认缩放因子：保持与旧行为一致，逻辑宽度与 CSS 宽度相同
-        self._default_device_scale_factor: float = 1.0
-        # 当前 Context 所采用的缩放因子，用于在需要时重建 Context
-        self._current_device_scale_factor: float | None = None
+        self.playwright: Playwright | None = None
+        self.browser: Browser | None = None
+        self.context: BrowserContext | None = None
 
     async def _ensure_context(self) -> None:
-        """确保 Playwright Browser/Context 可用。
-
-        - 懒加载 playwright 实例和浏览器实例；
-        - 若 context 不存在或已关闭，则重新创建；
-        - 将所有初始化逻辑集中在一处，避免 html2pic 中散落判断。
-        """
-
-        # 仅使用服务端默认缩放因子
-        target_dsf: float = self._default_device_scale_factor
-
+        """Ensure that Playwright, Browser and BrowserContext are initialized."""
         if self.playwright is None:
             self.playwright = await async_playwright().start()
 
-        # 确认 Browser 仍然连接；若已断开则重建 Browser，并重置 Context 状态
-        browser_disconnected = False
-        if self.browser is not None:
-            is_connected = getattr(self.browser, "is_connected", None)
-            if callable(is_connected):
-                browser_disconnected = not bool(is_connected())
-
-        if self.browser is None or browser_disconnected:
-            # 若仍然连接则尝试关闭旧 Browser，避免资源泄漏
-            if self.browser is not None and not browser_disconnected:
+        # ensure browser launched
+        if self.browser is None or not self.browser.is_connected():
+            if self.browser is not None:
                 try:
                     await self.browser.close()
                 except Exception as e:
                     logger.debug(f"Close old browser failed: {e}")
+            self.browser = await self.playwright.chromium.launch(headless=True)
 
-            self.browser = await self.playwright.chromium.launch()
-            # Browser 重建后，旧 Context 需重置
-            self.context = None
-            self._current_device_scale_factor = None
-
-        context_closed = False
-        if self.context is not None:
-            # Playwright 的 BrowserContext 提供 is_closed 方法；为兼容性
-            # 使用 getattr 安全访问，避免未来实现细节变化导致 AttributeError。
-            is_closed = getattr(self.context, "is_closed", None)
-            if callable(is_closed):
-                context_closed = bool(is_closed())
-
-        # 若 Context 不存在、已关闭，或缩放因子不匹配，则重建 Context
-        if (
-            self.context is None
-            or context_closed
-            or self._current_device_scale_factor != target_dsf
-        ):
-            # 尝试关闭旧的 Context，避免资源泄漏
-            if self.context is not None and not context_closed:
-                try:
-                    await self.context.close()
-                except Exception as e:
-                    logger.debug(f"Close old browser context failed: {e}")
-
+        # ensure context available
+        if self.context is None:
             self.context = await self.browser.new_context(
-                device_scale_factor=target_dsf,
+                device_scale_factor=1.0,
             )
-            self._current_device_scale_factor = target_dsf
 
     async def from_jinja_template(self, template: str, data: dict) -> tuple[str, str]:
         env = SandboxedEnvironment()
@@ -171,35 +129,65 @@ class Text2ImgRender:
 
         return viewport_width
 
+    async def terminate(self) -> None:
+        """Terminate Playwright and close browser."""
+        if self.context is not None:
+            try:
+                await self.context.close()
+            except Exception as e:
+                logger.debug(f"Close context failed: {e}")
+            self.context = None
+
+        if self.browser is not None:
+            try:
+                await self.browser.close()
+            except Exception as e:
+                logger.debug(f"Close browser failed: {e}")
+            self.browser = None
+
+        if self.playwright is not None:
+            try:
+                await self.playwright.stop()
+            except Exception as e:
+                logger.debug(f"Stop Playwright failed: {e}")
+            self.playwright = None
+
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
-        # 使用默认的 BrowserContext 缩放因子（当前固定为 1.0）渲染页面
         await self._ensure_context()
+
+        if self.context is None:
+            raise RuntimeError("BrowserContext is not initialized.")
+
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
-        page = await self.context.new_page()
+
+        try:
+            page = await self.context.new_page()
+        except TargetClosedError as e:
+            logger.warning(
+                f"html2pic: Failed to create new page, restarting browser context: {e}"
+            )
+            await self.terminate()
+            await self._ensure_context()
+            page = await self.context.new_page()
 
         viewport_width = self._resolve_viewport_width(
             html_file_path, screenshot_options
         )
         if viewport_width is not None:
-            # 高度给一个合理默认值，full_page=True 时会自动扩展高度
+            # set viewport size to control the width of the screenshot
             await page.set_viewport_size({"width": viewport_width, "height": 720})
-            logger.info(
-                f"html2pic: set viewport width to {viewport_width}"
-            )
+            logger.info(f"html2pic: set viewport width to {viewport_width}")
 
         try:
             await page.goto(f"file://{html_file_path}")
-            # ScreenshotOptions 中的 viewport_width 仅用于内部控制 viewport，
-            # 不透传给 Playwright.screenshot，以免出现未知参数错误。
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
-            screenshot_kwargs.pop("device_scale_factor", None)
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
-            # 确保在异常情况下也能关闭 page，避免资源泄漏。
+            # Ensure the page is closed to free resources
             await page.close()
 
         logger.info(f"Rendered {html_file_path} to {result_path}")
