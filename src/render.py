@@ -48,11 +48,6 @@ class ScreenshotOptions(BaseModel):
     animations: Literal["allow", "disabled", None] = None
     caret: Literal["hide", "initial", None] = None
     scale: Literal["css", "device", None] = None
-    # 额外增强字段：若指定则在渲染前设置 Playwright BrowserContext 的 device_scale_factor，
-    # 未指定时使用服务端默认值（保持与旧版本一致，一般为 1.0）。
-    device_scale_factor: float | None = None
-    # 额外增强字段：若指定则强制使用该宽度作为 Playwright viewport 宽度，
-    # 未指定时则自动从 HTML meta viewport 中推断（保持向后兼容）。
     viewport_width: int | None = None
 
 
@@ -66,7 +61,7 @@ class Text2ImgRender:
         # 当前 Context 所采用的缩放因子，用于在需要时重建 Context
         self._current_device_scale_factor: float | None = None
 
-    async def _ensure_context(self, device_scale_factor: float | None = None) -> None:
+    async def _ensure_context(self) -> None:
         """确保 Playwright Browser/Context 可用。
 
         - 懒加载 playwright 实例和浏览器实例；
@@ -74,12 +69,8 @@ class Text2ImgRender:
         - 将所有初始化逻辑集中在一处，避免 html2pic 中散落判断。
         """
 
-        # 确定本次应使用的缩放因子：请求指定 > 默认值
-        target_dsf: float = (
-            device_scale_factor
-            if device_scale_factor is not None
-            else self._default_device_scale_factor
-        )
+        # 仅使用服务端默认缩放因子
+        target_dsf: float = self._default_device_scale_factor
 
         if self.playwright is None:
             self.playwright = await async_playwright().start()
@@ -166,8 +157,8 @@ class Text2ImgRender:
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
-        # 根据请求参数确定本次使用的 device_scale_factor（可选）
-        await self._ensure_context(screenshot_options.device_scale_factor)
+        # 使用默认的 BrowserContext 缩放因子（当前固定为 1.0）渲染页面
+        await self._ensure_context()
         suffix = screenshot_options.type if screenshot_options.type else "png"
         result_path, _ = generate_data_path(suffix=suffix, namespace="rendered")
         page = await self.context.new_page()
