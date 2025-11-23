@@ -38,7 +38,6 @@ html 转 img
     - `normal`: 设备像素比 1.0（默认）
     - `high`: 设备像素比 1.3
     - `ultra`: 设备像素比 1.8
-  - mask (List["Locator"]], optional): 指定截图时的遮罩的 Locator。元素将被一颜色为 #FF00FF 的框覆盖.
 
 ### GET /text2img/data/{id}
 

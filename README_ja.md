@@ -38,7 +38,6 @@ HTMLを画像に変換
     - `normal`: デバイスピクセル比 1.0（デフォルト）
     - `high`: デバイスピクセル比 1.3
     - `ultra`: デバイスピクセル比 1.8
-  - mask (List["Locator"]], optional): スクリーンショット時のマスクのLocatorを指定します。要素は#FF00FF色のボックスで覆われます。
 
 ### GET /text2img/data/{id}
 

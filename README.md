@@ -38,7 +38,6 @@ Convert HTML to image
     - `normal`: Device pixel ratio 1.0 (default)
     - `high`: Device pixel ratio 1.3
     - `ultra`: Device pixel ratio 1.8
-  - mask (List["Locator"]], optional): Specifies locators for masking during screenshot. Elements will be covered with a #FF00FF colored box.
 
 ### GET /text2img/data/{id}
 
