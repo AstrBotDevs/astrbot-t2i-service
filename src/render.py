@@ -75,8 +75,25 @@ class Text2ImgRender:
         if self.playwright is None:
             self.playwright = await async_playwright().start()
 
-        if self.browser is None:
+        # 确认 Browser 仍然连接；若已断开则重建 Browser，并重置 Context 状态
+        browser_disconnected = False
+        if self.browser is not None:
+            is_connected = getattr(self.browser, "is_connected", None)
+            if callable(is_connected):
+                browser_disconnected = not bool(is_connected())
+
+        if self.browser is None or browser_disconnected:
+            # 若仍然连接则尝试关闭旧 Browser，避免资源泄漏
+            if self.browser is not None and not browser_disconnected:
+                try:
+                    await self.browser.close()
+                except Exception as e:
+                    logger.debug(f"Close old browser failed: {e}")
+
             self.browser = await self.playwright.chromium.launch()
+            # Browser 重建后，旧 Context 需重置
+            self.context = None
+            self._current_device_scale_factor = None
 
         context_closed = False
         if self.context is not None:
