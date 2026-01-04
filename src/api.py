@@ -1,14 +1,24 @@
-import fastapi
-import os
 import asyncio
-from pydantic import BaseModel
-from jinja2.exceptions import SecurityError
+import os
+
+import fastapi
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from jinja2.exceptions import SecurityError
 from loguru import logger
-from .render import Text2ImgRender, ScreenshotOptions
+from pydantic import BaseModel
+
+from .render import ScreenshotOptions, Text2ImgRender
 from .util import cleanup_expired_files
 
 app = fastapi.FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 render = Text2ImgRender()
 
 
