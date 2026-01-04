@@ -1,5 +1,7 @@
 import asyncio
 import os
+import time
+from collections import deque
 
 import fastapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +22,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 render = Text2ImgRender()
+rate_limit_lock = asyncio.Lock()
+rate_limit_timestamps: deque[float] = deque()
+rate_limit_max_requests = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "0"))
+rate_limit_window_seconds = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "0"))
 
 
 class GenerateRequest(BaseModel):
@@ -51,6 +57,25 @@ async def periodic_cleanup():
         await asyncio.sleep(3600)
 
 
+async def enforce_rate_limit() -> int | None:
+    if rate_limit_max_requests <= 0 or rate_limit_window_seconds <= 0:
+        return None
+    now = time.monotonic()
+    async with rate_limit_lock:
+        while (
+            rate_limit_timestamps
+            and now - rate_limit_timestamps[0] >= rate_limit_window_seconds
+        ):
+            rate_limit_timestamps.popleft()
+        if len(rate_limit_timestamps) >= rate_limit_max_requests:
+            retry_after = rate_limit_window_seconds - (
+                now - rate_limit_timestamps[0]
+            )
+            return max(0, int(retry_after) + 1)
+        rate_limit_timestamps.append(now)
+    return None
+
+
 @app.get("/text2img/data/{id}")
 async def text2img_image(id: str):
     pic = f"data/{id}"
@@ -69,6 +94,14 @@ async def text2img(request: GenerateRequest):
     html: str
     options: ScreenshotOptions
     """
+
+    retry_after = await enforce_rate_limit()
+    if retry_after is not None:
+        return JSONResponse(
+            status_code=429,
+            content={"code": 1, "message": "rate limit exceeded", "data": {}},
+            headers={"Retry-After": str(retry_after)},
+        )
 
     is_json_return = request.json or False
     if request.tmpl or request.tmplname:
