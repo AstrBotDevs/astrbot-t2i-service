@@ -221,6 +221,11 @@ class Text2ImgRender:
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
             screenshot_kwargs.pop("device_scale_factor_level", None)
+
+            # Robustness: Remove quality if type is png, as Playwright errors out
+            if screenshot_options.type == "png":
+                screenshot_kwargs.pop("quality", None)
+
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
             # Ensure the page is closed to free resources
