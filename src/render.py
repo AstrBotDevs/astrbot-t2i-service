@@ -182,6 +182,17 @@ class Text2ImgRender:
                 logger.debug(f"Stop Playwright failed: {e}")
             self.playwright = None
 
+    @staticmethod
+    def _build_screenshot_kwargs(screenshot_options: ScreenshotOptions) -> dict:
+        screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
+        screenshot_kwargs.pop("viewport_width", None)
+        screenshot_kwargs.pop("device_scale_factor_level", None)
+
+        if screenshot_kwargs.get("type") != "jpeg":
+            screenshot_kwargs.pop("quality", None)
+
+        return screenshot_kwargs
+
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
@@ -218,9 +229,7 @@ class Text2ImgRender:
 
         try:
             await page.goto(f"file://{html_file_path}")
-            screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
-            screenshot_kwargs.pop("viewport_width", None)
-            screenshot_kwargs.pop("device_scale_factor_level", None)
+            screenshot_kwargs = self._build_screenshot_kwargs(screenshot_options)
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
             # Ensure the page is closed to free resources
