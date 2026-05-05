@@ -1,14 +1,16 @@
 import re
 
-from .util import generate_data_path
+from playwright._impl._errors import TargetClosedError
+from playwright.async_api import BrowserContext, Browser, Playwright
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 from typing import Literal
 from loguru import logger
-from playwright.async_api import BrowserContext, Browser, Playwright
-from playwright._impl._errors import TargetClosedError
+
+from .util import generate_data_path
 
 
 class FloatRect(TypedDict):
@@ -226,6 +228,7 @@ class Text2ImgRender:
             await page.set_content(
                 html_content,
                 wait_until="networkidle",
+                timeout=screenshot_options.timeout,
             )
 
             # 等待 JS 渲染 Markdown 完成（marked.js 异步执行）
@@ -233,12 +236,13 @@ class Text2ImgRender:
                 content_el = await page.query_selector("#content")
                 if content_el is not None:
                     await page.wait_for_selector(
-                        "#content:not(:empty)", timeout=10000
+                        "#content:not(:empty)",
+                        timeout=screenshot_options.timeout,
                     )
                     # 额外等待 500ms，确保 marked.js 完整渲染所有内容
                     await page.wait_for_timeout(500)
-            except Exception as e:
-                logger.debug(f"html2pic: wait_for_selector skipped: {e}")
+            except PlaywrightError as e:
+                logger.warning(f"html2pic: wait_for_selector failed or timed out: {e}")
 
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
