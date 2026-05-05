@@ -74,10 +74,19 @@ class Text2ImgRender:
         self.contexts: dict[str, BrowserContext] = {}
 
     async def _ensure_context(self, level: str = "normal") -> BrowserContext:
-        """Ensure that Playwright, Browser and BrowserContext are initialized."""
+        """Ensure that Playwright, Browser and BrowserContext are initialized.
+
+        Args:
+            level: Device scale factor level ("normal", "high", or "ultra").
+                   Defaults to "normal" if not specified.
+
+        Returns:
+            The BrowserContext for the specified level.
+        """
         if self.playwright is None:
             self.playwright = await async_playwright().start()
 
+        # ensure browser launched
         if self.browser is None or not self.browser.is_connected():
             if self.browser is not None:
                 try:
@@ -86,6 +95,7 @@ class Text2ImgRender:
                     logger.debug(f"Close old browser failed: {e}")
             self.browser = await self.playwright.chromium.launch(headless=True)
 
+        # ensure context available for the specified level
         if level not in self.contexts:
             scale_factor = self.SCALE_FACTOR_MAP.get(level, 1.0)
             self.contexts[level] = await self.browser.new_context(
@@ -113,12 +123,27 @@ class Text2ImgRender:
     def _resolve_viewport_width(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> int | None:
+        """根据截图参数与 HTML 内容推断 viewport 宽度。
+
+        优先级：
+        1. 调用方在 ScreenshotOptions 中显式指定 `viewport_width`；
+        2. 从 HTML 中的 `<meta name="viewport" content="width=xxx">` 自动解析；
+        3. 未能解析到时返回 None（调用方可选择使用 Playwright 默认值）。
+
+        将逻辑集中到独立方法，便于后续扩展：
+        - 支持更多 meta 语法 / 自定义 data-* 属性；
+        - 支持从额外配置源中读取默认宽度等。
+        """
+
+        # 1) 调用方显式指定，直接使用
         viewport_width: int | None = screenshot_options.viewport_width
         if viewport_width is not None:
             return viewport_width
 
+        # 2) 未指定时，从 HTML meta viewport 中推断
         try:
             with open(html_file_path, "r", encoding="utf-8") as f:
+                # 只读前几 KB 即可命中 <head> 区域
                 head_snippet = f.read(4096)
 
             pattern = (
@@ -134,6 +159,7 @@ class Text2ImgRender:
 
     async def terminate(self) -> None:
         """Terminate Playwright and close browser."""
+        # Close all contexts in the pool
         for level, context in list(self.contexts.items()):
             try:
                 await context.close()
@@ -159,6 +185,7 @@ class Text2ImgRender:
     async def html2pic(
         self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
+        # Determine which context to use based on device_scale_factor_level
         level = screenshot_options.device_scale_factor_level or "normal"
         context = await self._ensure_context(level)
 
@@ -171,6 +198,7 @@ class Text2ImgRender:
             logger.warning(
                 f"html2pic: Failed to create new page, restarting browser context: {e}"
             )
+            # Close and remove the specific context, then recreate it
             if level in self.contexts:
                 try:
                     await self.contexts[level].close()
@@ -184,6 +212,7 @@ class Text2ImgRender:
             html_file_path, screenshot_options
         )
         if viewport_width is not None:
+            # set viewport size to control the width of the screenshot
             await page.set_viewport_size({"width": viewport_width, "height": 720})
             logger.info(f"html2pic: set viewport width to {viewport_width}")
 
@@ -191,7 +220,6 @@ class Text2ImgRender:
             # 读取 HTML 内容，用 set_content() 加载而非 file:// 协议
             # file:// 协议下 Chromium 会因跨域策略阻断 CDN 脚本（marked.js 等），
             # 导致 JS 不执行，#content 永远为空。
-            # set_content() + base_url="https://cdn.jsdelivr.net" 可让 CDN 正常加载。
             with open(html_file_path, "r", encoding="utf-8") as f:
                 html_content = f.read()
 
@@ -216,11 +244,13 @@ class Text2ImgRender:
             screenshot_kwargs.pop("viewport_width", None)
             screenshot_kwargs.pop("device_scale_factor_level", None)
 
+            # Robustness: Remove quality if type is png, as Playwright errors out
             if screenshot_options.type == "png":
                 screenshot_kwargs.pop("quality", None)
 
             await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
+            # Ensure the page is closed to free resources
             await page.close()
 
         logger.info(f"Rendered {html_file_path} to {result_path}")
