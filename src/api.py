@@ -146,6 +146,9 @@ async def text2img(request: GenerateRequest):
             animations=None,
             caret=None,
             scale="device",
+            viewport_width=None,
+            viewport_height=None,
+            device_scale_factor_level=None,
         )
     )
 

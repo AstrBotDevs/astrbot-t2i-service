@@ -32,12 +32,19 @@ HTMLを画像に変換
   - clip (FloatRect, optional): スクリーンショット後にクリップする領域、xyは開始点です。
   - animations: (Literal["allow", "disabled"], optional): CSSアニメーションを許可するかどうか。
   - caret: (Literal["hide", "initial"], optional): `hide`に設定すると、スクリーンショット時にテキストキャレットが非表示になります。デフォルトは`hide`。
-  - scale: (Literal["css", "device"], optional): ページのスケール設定。`css`に設定すると、デバイス解像度とCSSピクセルが1:1で対応し、高解像度画面ではスクリーンショットが小さくなります。`device`に設定すると、デバイスの画面スケール設定または現在のPlaywright Page/Contextのdevice_scale_factorパラメータに従ってスケールされます。
-  - viewport_width (int, optional): スクリーンショットの幅を制御するカスタムビューポート幅。
-  - device_scale_factor_level (Literal["normal", "high", "ultra"], optional): デバイスピクセル比レベル、デフォルトは"normal"。異なるレベルは独立したブラウザコンテキストプールを使用し、より良いパフォーマンスとリソース分離を提供します。
-    - `normal`: デバイスピクセル比 1.0（デフォルト）
-    - `high`: デバイスピクセル比 1.3
-    - `ultra`: デバイスピクセル比 1.8
+    - scale: (Literal["css", "device"], optional): ページのスケール設定。`css`に設定すると、デバイス解像度とCSSピクセルが1:1で対応し、高解像度画面ではスクリーンショットが小さくなります。`device`に設定すると、デバイスの画面スケール設定または現在のPlaywright Page/Contextのdevice_scale_factorパラメータに従ってスケールされます。
+    - viewport_width (int, optional): スクリーンショットの幅を制御するカスタムビューポート幅。優先順位順：
+      1. リクエストオプションで明示的に指定
+      2. HTMLの`<meta name="viewport" content="width=...">` から自動解析
+      3. 指定されていない場合、デフォルトは800px
+    - viewport_height (int, optional): スクリーンショットの高さを制御するカスタムビューポート高さ。優先順位順：
+      1. リクエストオプションで明示的に指定
+      2. HTMLの`<meta name="viewport" content="height=...">` から自動解析
+      3. 指定されていない場合、デフォルトは720px
+    - device_scale_factor_level (Literal["normal", "high", "ultra"], optional): デバイスピクセル比レベル、デフォルトは"normal"。異なるレベルは独立したブラウザコンテキストプールを使用し、より良いパフォーマンスとリソース分離を提供します。
+      - `normal`: デバイスピクセル比 1.0（デフォルト）
+      - `high`: デバイスピクセル比 1.3
+      - `ultra`: デバイスピクセル比 1.8
 
 ### GET /text2img/data/{id}
 

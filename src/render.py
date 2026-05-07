@@ -40,6 +40,15 @@ class ScreenshotOptions(BaseModel):
             当设置为 `device` 时，则根据设备的屏幕缩放设置或当前 Playwright 的 Page/Context 中的
             device_scale_factor 参数来缩放.
         viewport_width: (int, optional): 自定义视口宽度，用于控制截图宽度.
+            优先级：
+            1. 显式指定此参数；
+            2. 从 HTML 的 <meta name="viewport" content="width=..."> 自动解析；
+            3. 未指定时默认为 800px.
+        viewport_height: (int, optional): 自定义视口高度，用于控制截图高度.
+            优先级：
+            1. 显式指定此参数；
+            2. 从 HTML 的 <meta name="viewport" content="height=..."> 自动解析；
+            3. 未指定时默认为 720px.
         device_scale_factor_level: (Literal["normal", "high", "ultra"], optional): 设备像素比等级.
             - normal: 1.0
             - high: 1.3
@@ -58,6 +67,7 @@ class ScreenshotOptions(BaseModel):
     caret: Literal["hide", "initial", None] = None
     scale: Literal["css", "device", None] = None
     viewport_width: int | None = None
+    viewport_height: int | None = None
     device_scale_factor_level: Literal["normal", "high", "ultra", None] = None
 
 
@@ -122,42 +132,53 @@ class Text2ImgRender:
             f.write(html)
         return html_file_path, abs_path
 
-    def _resolve_viewport_width(
-        self, html_file_path: str, screenshot_options: ScreenshotOptions
-    ) -> int | None:
-        """根据截图参数与 HTML 内容推断 viewport 宽度。
+    def _resolve_viewport_size(
+            self, html_file_path: str, screenshot_options: ScreenshotOptions
+    ) -> tuple[int | None, int | None]:
+        """根据截图参数与 HTML 内容推断 viewport 大小（宽, 高）。
 
         优先级：
-        1. 调用方在 ScreenshotOptions 中显式指定 `viewport_width`；
-        2. 从 HTML 中的 `<meta name="viewport" content="width=xxx">` 自动解析；
-        3. 未能解析到时返回 None（调用方可选择使用 Playwright 默认值）。
+        1. 调用方在 ScreenshotOptions 中显式指定 `viewport_width` / `viewport_height`；
+        2. 从 HTML 中的 `<meta name="viewport" content="width=...; height=...">` 自动解析；
+        3. 未能解析到时返回对应的 None（调用方可选择使用 Playwright 默认值）。
 
         将逻辑集中到独立方法，便于后续扩展：
         - 支持更多 meta 语法 / 自定义 data-* 属性；
         - 支持从额外配置源中读取默认宽度等。
         """
 
-        # 1) 调用方显式指定，直接使用
         viewport_width: int | None = screenshot_options.viewport_width
-        if viewport_width is not None:
-            return viewport_width
+        viewport_height: int | None = screenshot_options.viewport_height
 
-        # 2) 未指定时，从 HTML meta viewport 中推断
+        # 如果两者都有显式值，直接返回
+        if viewport_width is not None and viewport_height is not None:
+            return viewport_width, viewport_height
+
+        # 未指定时，尝试从 HTML meta 中解析（只读前几 KB 即可命中 <head> 区域）
         try:
             with open(html_file_path, "r", encoding="utf-8") as f:
-                # 只读前几 KB 即可命中 <head> 区域
                 head_snippet = f.read(4096)
 
-            pattern = (
-                r'<meta\s+[^>]*name=["\']viewport["\'][^>]*'
-                r'content=["\'][^"\']*width\s*=\s*(\d+)[^"\']*["\'][^>]*>'
-            )
-            if m := re.search(pattern, head_snippet, re.IGNORECASE):
-                viewport_width = int(m[1])
+            # 尝试解析宽度和高度（允许任意顺序出现在 content 中）
+            if viewport_width is None:
+                pattern = (
+                    r'<meta\s+[^>]*name=["\']viewport["\'][^>]*'
+                    r'content=["\'][^"\']*width\s*=\s*(\d+)[^"\']*["\'][^>]*>'
+                )
+                if m := re.search(pattern, head_snippet, re.IGNORECASE):
+                    viewport_width = int(m[1])
+
+            if viewport_height is None:
+                pattern = (
+                    r'<meta\s+[^>]*name=["\']viewport["\'][^>]*'
+                    r'content=["\'][^"\']*height\s*=\s*(\d+)[^"\']*["\'][^>]*>'
+                )
+                if m := re.search(pattern, head_snippet, re.IGNORECASE):
+                    viewport_height = int(m[1])
         except (OSError, UnicodeDecodeError, re.error, ValueError) as e:
             logger.debug(f"Adjust viewport from meta tag failed: {e}")
 
-        return viewport_width
+        return viewport_width, viewport_height
 
     async def terminate(self) -> None:
         """Terminate Playwright and close browser."""
@@ -185,7 +206,7 @@ class Text2ImgRender:
             self.playwright = None
 
     async def html2pic(
-        self, html_file_path: str, screenshot_options: ScreenshotOptions
+            self, html_file_path: str, screenshot_options: ScreenshotOptions
     ) -> str:
         # Determine which context to use based on device_scale_factor_level
         level = screenshot_options.device_scale_factor_level or "normal"
@@ -210,13 +231,17 @@ class Text2ImgRender:
             context = await self._ensure_context(level)
             page = await context.new_page()
 
-        viewport_width = self._resolve_viewport_width(
+        viewport_width, viewport_height = self._resolve_viewport_size(
             html_file_path, screenshot_options
         )
-        if viewport_width is not None:
-            # set viewport size to control the width of the screenshot
-            await page.set_viewport_size({"width": viewport_width, "height": 720})
-            logger.info(f"html2pic: set viewport width to {viewport_width}")
+
+        width = viewport_width if viewport_width is not None else 800
+        height = viewport_height if viewport_height is not None else 720
+        # Set viewport size if either width or height is specified
+        if viewport_width is not None and viewport_height is not None:
+            # Default values if one dimension not specified
+            await page.set_viewport_size({"width": width, "height": height})
+            logger.info(f"html2pic: set viewport size to {width}x{height}")
 
         try:
             # 读取 HTML 内容，用 set_content() 加载而非 file:// 协议
@@ -246,6 +271,7 @@ class Text2ImgRender:
 
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
+            screenshot_kwargs.pop("viewport_height", None)
             screenshot_kwargs.pop("device_scale_factor_level", None)
 
             # Robustness: Remove quality if type is png, as Playwright errors out

@@ -32,12 +32,19 @@ html 转 img
   - clip (FloatRect, optional): 截图后裁切的区域，xy为起点.
   - animations: (Literal["allow", "disabled"], optional): 是否允许播放 CSS 动画.
   - caret: (Literal["hide", "initial"], optional): 当设置为 `hide` 时，截图时将隐藏文本插入符号，默认为 `hide`.
-  - scale: (Literal["css", "device"], optional): 页面缩放设置. 当设置为 `css` 时，则将设备分辨率与 CSS 中的像素一一对应，在高分屏上会使得截图变小. 当设置为 `device` 时，则根据设备的屏幕缩放设置或当前 Playwright 的 Page/Context 中的 device_scale_factor 参数来缩放.
-  - viewport_width (int, optional): 自定义视口宽度，用于控制截图宽度.
-  - device_scale_factor_level (Literal["normal", "high", "ultra"], optional): 设备像素比等级，默认为 "normal". 不同等级使用独立的浏览器上下文池，提供更好的性能和资源隔离.
-    - `normal`: 设备像素比 1.0（默认）
-    - `high`: 设备像素比 1.3
-    - `ultra`: 设备像素比 1.8
+    - scale: (Literal["css", "device"], optional): 页面缩放设置. 当设置为 `css` 时，则将设备分辨率与 CSS 中的像素一一对应，在高分屏上会使得截图变小. 当设置为 `device` 时，则根据设备的屏幕缩放设置或当前 Playwright 的 Page/Context 中的 device_scale_factor 参数来缩放.
+    - viewport_width (int, optional): 自定义视口宽度，用于控制截图宽度. 优先级顺序：
+      1. 在请求 options 中显式指定
+      2. 从 HTML 的 `<meta name="viewport" content="width=...">` 自动解析
+      3. 未指定时默认为 800px
+    - viewport_height (int, optional): 自定义视口高度，用于控制截图高度. 优先级顺序：
+      1. 在请求 options 中显式指定
+      2. 从 HTML 的 `<meta name="viewport" content="height=...">` 自动解析
+      3. 未指定时默认为 720px
+    - device_scale_factor_level (Literal["normal", "high", "ultra"], optional): 设备像素比等级，默认为 "normal". 不同等级使用独立的浏览器上下文池，提供更好的性能和资源隔离.
+      - `normal`: 设备像素比 1.0（默认）
+      - `high`: 设备像素比 1.3
+      - `ultra`: 设备像素比 1.8
 
 ### GET /text2img/data/{id}
 

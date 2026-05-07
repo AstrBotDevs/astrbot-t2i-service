@@ -33,7 +33,14 @@ Convert HTML to image
   - animations: (Literal["allow", "disabled"], optional): Whether to allow CSS animations.
   - caret: (Literal["hide", "initial"], optional): When set to `hide`, the text caret will be hidden during screenshot, default is `hide`.
   - scale: (Literal["css", "device"], optional): Page scaling settings. When set to `css`, device resolution maps 1:1 with CSS pixels, making screenshots smaller on high-DPI screens. When set to `device`, scales according to device screen scaling or the device_scale_factor parameter in the current Playwright Page/Context.
-  - viewport_width (int, optional): Custom viewport width to control screenshot width.
+  - viewport_width (int, optional): Custom viewport width to control screenshot width. Resolved in priority order:
+    1. Explicitly set in request options
+    2. Auto-parsed from `<meta name="viewport" content="width=...">` in HTML
+    3. Defaults to 800px if not specified and no meta tag found
+  - viewport_height (int, optional): Custom viewport height to control screenshot height. Resolved in priority order:
+    1. Explicitly set in request options
+    2. Auto-parsed from `<meta name="viewport" content="height=...">` in HTML
+    3. Defaults to 720px if not specified and no meta tag found
   - device_scale_factor_level (Literal["normal", "high", "ultra"], optional): Device pixel ratio level, default is "normal". Different levels use independent browser context pools for better performance and resource isolation.
     - `normal`: Device pixel ratio 1.0 (default)
     - `high`: Device pixel ratio 1.3
