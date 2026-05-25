@@ -236,10 +236,9 @@ class Text2ImgRender:
         width = viewport_width if viewport_width is not None else 800
         height = viewport_height if viewport_height is not None else 720
         # Set viewport size if either width or height is specified
-        if viewport_width is not None and viewport_height is not None:
-            # Default values if one dimension not specified
-            await page.set_viewport_size({"width": width, "height": height})
-            logger.info(f"html2pic: set viewport size to {width}x{height}")
+        # Default values if one dimension not specified
+        await page.set_viewport_size({"width": width, "height": height})
+        logger.info(f"html2pic: set viewport size to {width}x{height}")
 
         try:
             await page.goto(
