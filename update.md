@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | `selector` | `str` | `None` | CSS 选择器。配置后优先对匹配到的元素执行截图，而不是对整个页面截图。 |
 | `fallback_selector` | `str` | `None` | `selector` 未匹配到元素时使用的备用 CSS 选择器。建议配置为 `body`。 |
-| `selector_timeout` | `float` | `None` | 等待 `selector` 出现的超时时间，单位为毫秒。未配置时不会额外等待，只会立即查询当前页面中是否存在该元素。 |
+| `selector_timeout` | `int` | `None` | 等待 `selector` 出现的超时时间，单位为毫秒。未配置时不会额外等待，只会立即查询当前页面中是否存在该元素。 |
 
 ### 不配置时的默认行为
 
@@ -54,7 +54,7 @@ await self.html_render(
 | 配置项 | 类型 | 不配置时的默认值 | 说明 |
 | --- | --- | --- | --- |
 | `wait_for_resources` | `bool` | `None`，等效于 `False` | 是否启用截图前资源等待。未配置时不启用额外等待，保持原来的渲染行为。 |
-| `resource_timeout` | `float` | `None` | 资源等待总超时时间，单位为毫秒。仅在 `wait_for_resources` 为 `true` 时生效。未配置时优先使用已有的 `timeout`；如果 `timeout` 也未配置，则默认使用 `5000` 毫秒。 |
+| `resource_timeout` | `int` | `None` | 资源等待总超时时间，单位为毫秒。仅在 `wait_for_resources` 为 `true` 时生效。未配置时优先使用已有的 `timeout`；如果 `timeout` 也未配置，则默认使用 `5000` 毫秒。 |
 
 ### 配置方法
 

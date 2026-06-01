@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 
@@ -9,6 +10,8 @@ from typing_extensions import TypedDict
 from typing import Literal
 from loguru import logger
 from playwright.async_api import BrowserContext, Browser, Playwright
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright._impl._errors import TargetClosedError
 
 
@@ -54,11 +57,11 @@ class ScreenshotOptions(BaseModel):
             - ultra: 1.8
         selector: (str, optional): CSS 选择器。设置后优先对匹配的元素截图，而不是整页截图.
         fallback_selector: (str, optional): selector 未命中时使用的备用 CSS 选择器.
-        selector_timeout: (float, optional): 等待 selector 出现的超时时间，单位毫秒.
+        selector_timeout: (int, optional): 等待 selector 出现的超时时间，单位毫秒.
         wait_until: (Literal["commit", "domcontentloaded", "load", "networkidle"], optional):
             页面导航等待状态。未指定时使用 Playwright 默认值.
         wait_for_resources: (bool, optional): 是否在截图前等待网络空闲、图片解码和字体加载.
-        resource_timeout: (float, optional): 等待资源加载的超时时间，单位毫秒，默认 5000.
+        resource_timeout: (int, optional): 等待资源加载的超时时间，单位毫秒，默认 5000.
 
     @author: Redlnn(https://github.com/GraiaCommunity/graiax-text2img-playwright)
     """
@@ -77,10 +80,10 @@ class ScreenshotOptions(BaseModel):
     device_scale_factor_level: Literal["normal", "high", "ultra", None] = None
     selector: str | None = None
     fallback_selector: str | None = None
-    selector_timeout: float | None = None
+    selector_timeout: int | None = None
     wait_until: Literal["commit", "domcontentloaded", "load", "networkidle", None] = None
     wait_for_resources: bool | None = None
-    resource_timeout: float | None = None
+    resource_timeout: int | None = None
 
 
 class Text2ImgRender:
@@ -308,12 +311,18 @@ class Text2ImgRender:
                     screenshot_options.selector,
                     timeout=screenshot_options.selector_timeout,
                 )
-            except Exception as e:
+            except PlaywrightTimeoutError as e:
                 logger.debug(
                     f"html2pic: wait for selector '{screenshot_options.selector}' failed: {e}"
                 )
         else:
-            element = await page.query_selector(screenshot_options.selector)
+            try:
+                element = await page.query_selector(screenshot_options.selector)
+            except PlaywrightError as e:
+                logger.warning(
+                    f"html2pic: invalid selector '{screenshot_options.selector}', "
+                    f"skip element screenshot: {e}"
+                )
 
         if element is not None:
             logger.info(
@@ -322,7 +331,14 @@ class Text2ImgRender:
             return element
 
         if screenshot_options.fallback_selector:
-            fallback = await page.query_selector(screenshot_options.fallback_selector)
+            try:
+                fallback = await page.query_selector(screenshot_options.fallback_selector)
+            except PlaywrightError as e:
+                logger.warning(
+                    "html2pic: invalid fallback selector "
+                    f"'{screenshot_options.fallback_selector}', fallback to page screenshot: {e}"
+                )
+                fallback = None
             if fallback is not None:
                 logger.info(
                     f"html2pic: selector '{screenshot_options.selector}' not found, "
@@ -362,9 +378,14 @@ class Text2ImgRender:
             return
 
         try:
-            result = await page.evaluate(
-                """
-                async ({ timeout }) => {
+            eval_timeout = resource_timeout
+            if screenshot_options.timeout is not None and screenshot_options.timeout > 0:
+                eval_timeout = min(resource_timeout, int(screenshot_options.timeout))
+
+            result = await asyncio.wait_for(
+                page.evaluate(
+                    """
+                async (timeout) => {
                   const images = Array.from(document.images || []);
                   const waitImage = (img) => {
                     if (img.complete) {
@@ -404,8 +425,14 @@ class Text2ImgRender:
                   };
                 }
                 """,
-                {"timeout": resource_timeout},
+                    eval_timeout,
+                ),
+                timeout=eval_timeout / 1000,
             )
+            if not isinstance(result, dict):
+                logger.warning("html2pic: wait for resources returned invalid result")
+                return
+
             if result.get("timedOut"):
                 logger.warning(
                     "html2pic: wait for resources timed out after "
