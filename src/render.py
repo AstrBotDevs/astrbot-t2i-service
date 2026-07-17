@@ -1,4 +1,6 @@
+import asyncio
 import re
+import time
 
 from .util import generate_data_path
 from playwright.async_api import async_playwright
@@ -8,6 +10,8 @@ from typing_extensions import TypedDict
 from typing import Literal
 from loguru import logger
 from playwright.async_api import BrowserContext, Browser, Playwright
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright._impl._errors import TargetClosedError
 
 
@@ -51,6 +55,13 @@ class ScreenshotOptions(BaseModel):
             - normal: 1.0
             - high: 1.3
             - ultra: 1.8
+        selector: (str, optional): CSS 选择器。设置后优先对匹配的元素截图，而不是整页截图.
+        fallback_selector: (str, optional): selector 未命中时使用的备用 CSS 选择器.
+        selector_timeout: (int, optional): 等待 selector 出现的超时时间，单位毫秒.
+        wait_until: (Literal["commit", "domcontentloaded", "load", "networkidle"], optional):
+            页面导航等待状态。未指定时使用 Playwright 默认值.
+        wait_for_resources: (bool, optional): 是否在截图前等待网络空闲、图片解码和字体加载.
+        resource_timeout: (int, optional): 等待资源加载的超时时间，单位毫秒，默认 5000.
 
     @author: Redlnn(https://github.com/GraiaCommunity/graiax-text2img-playwright)
     """
@@ -67,6 +78,12 @@ class ScreenshotOptions(BaseModel):
     viewport_width: int | None = None
     viewport_height: int | None = None
     device_scale_factor_level: Literal["normal", "high", "ultra", None] = None
+    selector: str | None = None
+    fallback_selector: str | None = None
+    selector_timeout: int | None = None
+    wait_until: Literal["commit", "domcontentloaded", "load", "networkidle", None] = None
+    wait_for_resources: bool | None = None
+    resource_timeout: int | None = None
 
 
 class Text2ImgRender:
@@ -240,19 +257,37 @@ class Text2ImgRender:
         logger.info(f"html2pic: set viewport size to {width}x{height}")
 
         try:
-            await page.goto(
-                f"file://{html_file_path}", timeout=screenshot_options.timeout
-            )
+            goto_kwargs = {"timeout": screenshot_options.timeout}
+            if screenshot_options.wait_until:
+                goto_kwargs["wait_until"] = screenshot_options.wait_until
+            await page.goto(f"file://{html_file_path}", **goto_kwargs)
+
+            if screenshot_options.wait_for_resources:
+                await self._wait_for_resources(page, screenshot_options)
+
             screenshot_kwargs = screenshot_options.model_dump(exclude_none=True)
             screenshot_kwargs.pop("viewport_width", None)
             screenshot_kwargs.pop("viewport_height", None)
             screenshot_kwargs.pop("device_scale_factor_level", None)
+            screenshot_kwargs.pop("selector", None)
+            screenshot_kwargs.pop("fallback_selector", None)
+            screenshot_kwargs.pop("selector_timeout", None)
+            screenshot_kwargs.pop("wait_until", None)
+            screenshot_kwargs.pop("wait_for_resources", None)
+            screenshot_kwargs.pop("resource_timeout", None)
 
             # Robustness: Remove quality if type is png, as Playwright errors out
             if screenshot_options.type == "png":
                 screenshot_kwargs.pop("quality", None)
 
-            await page.screenshot(path=result_path, **screenshot_kwargs)
+            element = await self._resolve_screenshot_element(page, screenshot_options)
+            if element is not None:
+                element_screenshot_kwargs = screenshot_kwargs.copy()
+                element_screenshot_kwargs.pop("full_page", None)
+                element_screenshot_kwargs.pop("clip", None)
+                await element.screenshot(path=result_path, **element_screenshot_kwargs)
+            else:
+                await page.screenshot(path=result_path, **screenshot_kwargs)
         finally:
             # Ensure the page is closed to free resources
             await page.close()
@@ -260,3 +295,159 @@ class Text2ImgRender:
         logger.info(f"Rendered {html_file_path} to {result_path}")
 
         return result_path
+
+    async def _resolve_screenshot_element(self, page, screenshot_options: ScreenshotOptions):
+        """Resolve an element target for screenshot when selector options are provided."""
+
+        if not screenshot_options.selector:
+            return None
+
+        element = None
+        if screenshot_options.selector_timeout is not None:
+            try:
+                element = await page.wait_for_selector(
+                    screenshot_options.selector,
+                    timeout=screenshot_options.selector_timeout,
+                )
+            except PlaywrightTimeoutError as e:
+                logger.debug(
+                    f"html2pic: wait for selector '{screenshot_options.selector}' failed: {e}"
+                )
+        else:
+            try:
+                element = await page.query_selector(screenshot_options.selector)
+            except PlaywrightError as e:
+                logger.warning(
+                    f"html2pic: invalid selector '{screenshot_options.selector}', "
+                    f"skip element screenshot: {e}"
+                )
+
+        if element is not None:
+            logger.info(
+                f"html2pic: screenshot element matched selector '{screenshot_options.selector}'"
+            )
+            return element
+
+        if screenshot_options.fallback_selector:
+            try:
+                fallback = await page.query_selector(screenshot_options.fallback_selector)
+            except PlaywrightError as e:
+                logger.warning(
+                    "html2pic: invalid fallback selector "
+                    f"'{screenshot_options.fallback_selector}', fallback to page screenshot: {e}"
+                )
+                fallback = None
+            if fallback is not None:
+                logger.info(
+                    f"html2pic: selector '{screenshot_options.selector}' not found, "
+                    f"screenshot fallback selector '{screenshot_options.fallback_selector}'"
+                )
+                return fallback
+
+        logger.warning(
+            f"html2pic: selector '{screenshot_options.selector}' not found, fallback to page screenshot"
+        )
+        return None
+
+    async def _wait_for_resources(self, page, screenshot_options: ScreenshotOptions):
+        """Wait for common remote resources before taking a screenshot."""
+
+        timeout = screenshot_options.resource_timeout
+        if timeout is None:
+            timeout = screenshot_options.timeout if screenshot_options.timeout is not None else 5000
+        if timeout <= 0:
+            return
+
+        deadline = time.monotonic() + timeout / 1000
+
+        def remaining_timeout() -> int:
+            return max(0, int((deadline - time.monotonic()) * 1000))
+
+        try:
+            network_timeout = remaining_timeout()
+            if network_timeout > 0:
+                await page.wait_for_load_state("networkidle", timeout=network_timeout)
+        except Exception as e:
+            logger.warning(f"html2pic: wait for networkidle failed: {e}")
+
+        resource_timeout = remaining_timeout()
+        if resource_timeout <= 0:
+            logger.warning(f"html2pic: wait for resources timed out after {timeout}ms")
+            return
+
+        try:
+            eval_timeout = resource_timeout
+            if screenshot_options.timeout is not None and screenshot_options.timeout > 0:
+                eval_timeout = min(resource_timeout, int(screenshot_options.timeout))
+
+            result = await asyncio.wait_for(
+                page.evaluate(
+                    """
+                async (timeout) => {
+                  const images = Array.from(document.images || []);
+                  const waitImage = (img) => {
+                    if (img.complete) {
+                      return Promise.resolve();
+                    }
+                    if (typeof img.decode === "function") {
+                      return img.decode().catch(() => undefined);
+                    }
+                    return new Promise((resolve) => {
+                      img.addEventListener("load", resolve, { once: true });
+                      img.addEventListener("error", resolve, { once: true });
+                    });
+                  };
+                  const waitFonts = () => {
+                    if (document.fonts && document.fonts.ready) {
+                      return document.fonts.ready.catch(() => undefined);
+                    }
+                    return Promise.resolve();
+                  };
+                  let timedOut = false;
+                  const allResources = Promise.all([
+                    ...images.map(waitImage),
+                    waitFonts(),
+                  ]);
+                  const timeoutPromise = new Promise((resolve) => {
+                    setTimeout(() => {
+                      timedOut = true;
+                      resolve();
+                    }, timeout);
+                  });
+                  await Promise.race([allResources, timeoutPromise]);
+                  return {
+                    imageCount: images.length,
+                    completeCount: images.filter((img) => img.complete).length,
+                    brokenCount: images.filter((img) => img.complete && img.naturalWidth === 0).length,
+                    timedOut,
+                  };
+                }
+                """,
+                    eval_timeout,
+                ),
+                timeout=eval_timeout / 1000,
+            )
+            if not isinstance(result, dict):
+                logger.warning("html2pic: wait for resources returned invalid result")
+                return
+
+            if result.get("timedOut"):
+                logger.warning(
+                    "html2pic: wait for resources timed out after "
+                    f"{timeout}ms, images={result.get('completeCount')}/"
+                    f"{result.get('imageCount')}"
+                )
+            elif result.get("brokenCount"):
+                logger.warning(
+                    "html2pic: resources loaded with broken images, "
+                    f"broken={result.get('brokenCount')}/"
+                    f"{result.get('imageCount')}"
+                )
+            else:
+                logger.info(
+                    "html2pic: resources ready, "
+                    f"images={result.get('completeCount')}/"
+                    f"{result.get('imageCount')}"
+                )
+        except Exception as e:
+            logger.warning(f"html2pic: wait for image/font resources failed: {e}")
